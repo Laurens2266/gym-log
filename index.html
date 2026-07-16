@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+<title>Gym Log</title>
+<meta name="theme-color" content="#14151A" />
+<link rel="manifest" href="manifest.json" />
+<link rel="apple-touch-icon" href="icon-192.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Gym Log" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <span class="brand">GYM<span class="brand-accent">LOG</span></span>
+    <span id="today-label" class="today-label"></span>
+  </div>
+</header>
+
+<main id="view-root" class="view-root"></main>
+
+<nav class="tabbar" id="tabbar">
+  <button class="tab-btn" data-view="today">
+    <svg viewBox="0 0 24 24" class="tab-icon"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
+    <span>Vandaag</span>
+  </button>
+  <button class="tab-btn" data-view="schema">
+    <svg viewBox="0 0 24 24" class="tab-icon"><rect x="4" y="4" width="16" height="16" rx="2" stroke="currentColor" stroke-width="2"/><path d="M4 10h16M9 4v16" stroke="currentColor" stroke-width="2"/></svg>
+    <span>Schema</span>
+  </button>
+  <button class="tab-btn" data-view="stats">
+    <svg viewBox="0 0 24 24" class="tab-icon"><path d="M5 19V9M12 19V5M19 19v-7" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
+    <span>Stats</span>
+  </button>
+  <button class="tab-btn" data-view="data">
+    <svg viewBox="0 0 24 24" class="tab-icon"><path d="M12 4v11m0 0l-4-4m4 4l4-4M5 19h14" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <span>Data</span>
+  </button>
+</nav>
+
+<div id="toast" class="toast"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/js-yaml@4.1.0/dist/js-yaml.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script src="app.js"></script>
+<script>
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("sw.js").catch(() => {});
+    });
+  }
+</script>
+</body>
+</html>
