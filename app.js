@@ -78,6 +78,7 @@ function loadState() {
 
 function saveState() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  scheduleDropboxSync();
 }
 
 /* ---------- Date helpers ---------- */
@@ -155,6 +156,229 @@ function historicalMaxWeight(group, exerciseId, excludeIso) {
   return max;
 }
 
+/* =========================================================
+   DROPBOX SYNC
+   PKCE OAuth (no client secret) against the app's own Dropbox
+   "App folder". Auto-uploads a debounced YAML snapshot after
+   every local change, and pulls+merges once on startup so a
+   second device (or a wiped Safari) catches up automatically.
+   ========================================================= */
+const DBX_CLIENT_ID = "c22rza6ronv2ixj";
+const DBX_REDIRECT_URI = "https://laurens2266.github.io/gym-log/";
+const DBX_FILE_PATH = "/gymlog.yaml";
+const DBX_LS = {
+  refresh: "gymlog_dbx_refresh_token",
+  access: "gymlog_dbx_access_token",
+  expiry: "gymlog_dbx_access_expiry",
+  lastSync: "gymlog_dbx_last_sync"
+};
+const DBX_SS = { verifier: "gymlog_dbx_verifier", state: "gymlog_dbx_state" };
+
+let dbxSyncStatus = "idle"; // idle | syncing | synced | error
+let dbxSyncTimer = null;
+
+function dbxIsConnected() {
+  return !!localStorage.getItem(DBX_LS.refresh);
+}
+
+function dbxB64Url(buf) {
+  return btoa(String.fromCharCode(...new Uint8Array(buf)))
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function dbxRandomString(len) {
+  const arr = new Uint8Array(len);
+  crypto.getRandomValues(arr);
+  return dbxB64Url(arr.buffer);
+}
+async function dbxSha256(str) {
+  return await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
+}
+
+async function dbxConnect() {
+  const verifier = dbxRandomString(64);
+  const oauthState = dbxRandomString(16);
+  sessionStorage.setItem(DBX_SS.verifier, verifier);
+  sessionStorage.setItem(DBX_SS.state, oauthState);
+  const challenge = dbxB64Url(await dbxSha256(verifier));
+  const url = new URL("https://www.dropbox.com/oauth2/authorize");
+  url.searchParams.set("client_id", DBX_CLIENT_ID);
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("code_challenge", challenge);
+  url.searchParams.set("code_challenge_method", "S256");
+  url.searchParams.set("redirect_uri", DBX_REDIRECT_URI);
+  url.searchParams.set("token_access_type", "offline");
+  url.searchParams.set("state", oauthState);
+  window.location.href = url.toString();
+}
+
+function dbxDisconnect() {
+  localStorage.removeItem(DBX_LS.refresh);
+  localStorage.removeItem(DBX_LS.access);
+  localStorage.removeItem(DBX_LS.expiry);
+  localStorage.removeItem(DBX_LS.lastSync);
+  dbxSyncStatus = "idle";
+  toast("Losgekoppeld van Dropbox");
+  render();
+}
+
+async function dbxHandleRedirect() {
+  const params = new URLSearchParams(window.location.search);
+  const code = params.get("code");
+  if (!code) return;
+  const returnedState = params.get("state");
+  window.history.replaceState({}, "", window.location.pathname);
+
+  const expectedState = sessionStorage.getItem(DBX_SS.state);
+  const verifier = sessionStorage.getItem(DBX_SS.verifier);
+  sessionStorage.removeItem(DBX_SS.state);
+  sessionStorage.removeItem(DBX_SS.verifier);
+  if (!verifier || returnedState !== expectedState) {
+    toast("Dropbox-koppeling mislukt");
+    return;
+  }
+  try {
+    const res = await fetch("https://api.dropboxapi.com/oauth2/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        code,
+        grant_type: "authorization_code",
+        client_id: DBX_CLIENT_ID,
+        redirect_uri: DBX_REDIRECT_URI,
+        code_verifier: verifier
+      })
+    });
+    if (!res.ok) throw new Error("token exchange failed");
+    const data = await res.json();
+    localStorage.setItem(DBX_LS.refresh, data.refresh_token);
+    localStorage.setItem(DBX_LS.access, data.access_token);
+    localStorage.setItem(DBX_LS.expiry, String(Date.now() + data.expires_in * 1000 - 60000));
+    toast("Verbonden met Dropbox");
+    await dbxPullAndMerge();
+    await doDropboxSync(false);
+  } catch (e) {
+    toast("Dropbox-koppeling mislukt");
+  }
+}
+
+async function dbxGetAccessToken() {
+  const refresh = localStorage.getItem(DBX_LS.refresh);
+  if (!refresh) return null;
+  const expiry = parseInt(localStorage.getItem(DBX_LS.expiry) || "0", 10);
+  if (Date.now() < expiry) return localStorage.getItem(DBX_LS.access);
+  const res = await fetch("https://api.dropboxapi.com/oauth2/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: refresh,
+      client_id: DBX_CLIENT_ID
+    })
+  });
+  if (!res.ok) return null;
+  const data = await res.json();
+  localStorage.setItem(DBX_LS.access, data.access_token);
+  localStorage.setItem(DBX_LS.expiry, String(Date.now() + data.expires_in * 1000 - 60000));
+  return data.access_token;
+}
+
+async function dbxUpload(yamlStr) {
+  const token = await dbxGetAccessToken();
+  if (!token) return false;
+  const res = await fetch("https://content.dropboxapi.com/2/files/upload", {
+    method: "POST",
+    headers: {
+      "Authorization": "Bearer " + token,
+      "Content-Type": "application/octet-stream",
+      "Dropbox-API-Arg": JSON.stringify({ path: DBX_FILE_PATH, mode: "overwrite", mute: true })
+    },
+    body: yamlStr
+  });
+  return res.ok;
+}
+
+async function dbxDownload() {
+  const token = await dbxGetAccessToken();
+  if (!token) return null;
+  const res = await fetch("https://content.dropboxapi.com/2/files/download", {
+    method: "POST",
+    headers: {
+      "Authorization": "Bearer " + token,
+      "Dropbox-API-Arg": JSON.stringify({ path: DBX_FILE_PATH })
+    }
+  });
+  if (!res.ok) return null; // e.g. 409 not_found on first-ever sync
+  return await res.text();
+}
+
+function scheduleDropboxSync() {
+  if (!dbxIsConnected()) return;
+  clearTimeout(dbxSyncTimer);
+  dbxSyncTimer = setTimeout(() => doDropboxSync(false), 1500);
+}
+
+async function doDropboxSync(manual) {
+  if (!dbxIsConnected() || typeof jsyaml === "undefined") return;
+  clearTimeout(dbxSyncTimer);
+  dbxSyncStatus = "syncing";
+  updateDropboxStatusUI();
+  try {
+    const yamlStr = jsyaml.dump(buildExportObject());
+    const ok = await dbxUpload(yamlStr);
+    dbxSyncStatus = ok ? "synced" : "error";
+    if (ok) localStorage.setItem(DBX_LS.lastSync, String(Date.now()));
+    if (manual) toast(ok ? "Gesynchroniseerd met Dropbox" : "Synchroniseren mislukt");
+  } catch (e) {
+    dbxSyncStatus = "error";
+    if (manual) toast("Synchroniseren mislukt (geen internet?)");
+  }
+  updateDropboxStatusUI();
+}
+
+/* additive merge: remote fills gaps, local always wins on conflict
+   so a partially-synced day never gets clobbered mid-edit */
+function mergeRemoteIntoLocal(remoteObj) {
+  if (!remoteObj) return;
+  ["strength", "core"].forEach((group) => {
+    const remoteList = (remoteObj.library && remoteObj.library[group]) || [];
+    const localList = state.library[group];
+    const localIds = new Set(localList.map((e) => e.id));
+    remoteList.forEach((e) => { if (!localIds.has(e.id)) localList.push(e); });
+  });
+  if (remoteObj.schema) {
+    Object.keys(remoteObj.schema).forEach((day) => {
+      if (!state.schedule[day] || state.schedule[day].length === 0) {
+        state.schedule[day] = remoteObj.schema[day];
+      }
+    });
+  }
+  if (remoteObj.workouts) {
+    Object.entries(remoteObj.workouts).forEach(([iso, entry]) => {
+      if (state.logs[iso]) return;
+      applyWorkoutDay(iso, entry);
+    });
+  }
+  saveState();
+}
+
+async function dbxPullAndMerge() {
+  try {
+    const yamlStr = await dbxDownload();
+    if (!yamlStr || typeof jsyaml === "undefined") return;
+    const parsed = jsyaml.load(yamlStr);
+    mergeRemoteIntoLocal(parsed);
+  } catch (e) {
+    /* offline or first-ever sync: nothing to merge, ignore */
+  }
+}
+
+function updateDropboxStatusUI() {
+  const card = document.getElementById("dbx-status-card");
+  if (card) renderDropboxCard(card);
+  const dot = document.getElementById("dbx-dot");
+  if (dot) dot.className = "dbx-dot " + (dbxIsConnected() ? "dbx-" + dbxSyncStatus : "dbx-off");
+}
+
 /* ---------- Toast ---------- */
 let toastTimer = null;
 function toast(msg) {
@@ -173,6 +397,7 @@ function render() {
   document.querySelectorAll(".tab-btn").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.view === currentView);
   });
+  updateDropboxStatusUI();
   const root = document.getElementById("view-root");
   root.innerHTML = "";
   if (currentView === "today") root.appendChild(renderToday());
@@ -346,8 +571,7 @@ function renderCoreSection() {
   chipRow.style.marginBottom = "14px";
   state.library.core.forEach((ex) => {
     const chip = document.createElement("button");
-    chip.className = "btn btn-sm";
-    if (selected.includes(ex.id)) { chip.style.borderColor = "var(--accent)"; chip.style.color = "var(--accent)"; }
+    chip.className = "btn btn-sm" + (selected.includes(ex.id) ? " chip-active" : "");
     chip.textContent = ex.name;
     chip.onclick = () => {
       const cur = state.coreSelectionByDate[currentDate] || [];
@@ -414,7 +638,7 @@ function renderSchema() {
       <div class="drag-handle">⠿</div>
       <div class="exercise-edit-name">
         ${ex.name}<br/>
-        <input class="target-input" style="margin-top:4px;width:90px;background:var(--surface-2);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:4px 6px;font-size:12px;" value="${entry.target}" />
+        <input class="target-input" value="${entry.target}" />
       </div>
       <button class="btn btn-sm move-up" ${idx === 0 ? "disabled" : ""}>↑</button>
       <button class="btn btn-sm move-down" ${idx === list.length - 1 ? "disabled" : ""}>↓</button>
@@ -744,67 +968,17 @@ function buildExportObject() {
 function renderData() {
   const wrap = document.createElement("div");
 
-  const exportCard = document.createElement("div");
-  exportCard.className = "card";
-  exportCard.innerHTML = `
-    <div class="card-title-row"><h3 class="card-title">Exporteren</h3></div>
-    <p class="small-note">Download je logboek als YAML. Deel 'm daarna naar Dropbox via het iOS share-menu.</p>
-    <div class="btn-row" style="margin-bottom:10px;">
-      <button class="btn btn-accent" id="download-btn">Download YAML</button>
-      <button class="btn" id="show-yaml-btn">Toon / kopieer</button>
-    </div>
-    <textarea class="yaml-box" id="yaml-out" style="display:none;" readonly></textarea>
-  `;
-  exportCard.querySelector("#download-btn").onclick = () => downloadYAML();
-  exportCard.querySelector("#show-yaml-btn").onclick = () => {
-    const box = exportCard.querySelector("#yaml-out");
-    box.style.display = box.style.display === "none" ? "block" : "none";
-    if (box.style.display === "block") {
-      box.value = typeof jsyaml !== "undefined" ? jsyaml.dump(buildExportObject()) : "YAML library niet geladen (geen internet).";
-      box.select();
-    }
-  };
-  wrap.appendChild(exportCard);
-
-  const importCard = document.createElement("div");
-  importCard.className = "card";
-  importCard.innerHTML = `
-    <div class="card-title-row"><h3 class="card-title">Importeren</h3></div>
-    <p class="small-note">Plak YAML of kies een bestand. Dit vervangt je huidige data.</p>
-    <input type="file" id="yaml-file" accept=".yaml,.yml,text/yaml" style="margin-bottom:10px;" />
-    <textarea class="yaml-box" id="yaml-in" placeholder="Plak hier je YAML..."></textarea>
-    <div class="btn-row" style="margin-top:10px;">
-      <button class="btn btn-accent" id="import-btn">Importeren</button>
-    </div>
-  `;
-  importCard.querySelector("#yaml-file").onchange = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => { importCard.querySelector("#yaml-in").value = reader.result; };
-    reader.readAsText(file);
-  };
-  importCard.querySelector("#import-btn").onclick = () => {
-    const text = importCard.querySelector("#yaml-in").value.trim();
-    if (!text) { toast("Niets om te importeren"); return; }
-    if (typeof jsyaml === "undefined") { toast("YAML library niet geladen (geen internet)"); return; }
-    if (!confirm("Dit vervangt je huidige schema en/of logs waar overlap is. Doorgaan?")) return;
-    try {
-      const parsed = jsyaml.load(text);
-      importYAML(parsed);
-      toast("Geimporteerd");
-      render();
-    } catch (err) {
-      toast("Kon YAML niet lezen: " + err.message);
-    }
-  };
-  wrap.appendChild(importCard);
+  const dbxCard = document.createElement("div");
+  dbxCard.className = "card";
+  dbxCard.id = "dbx-status-card";
+  wrap.appendChild(dbxCard);
+  renderDropboxCard(dbxCard);
 
   const resetCard = document.createElement("div");
   resetCard.className = "card";
   resetCard.innerHTML = `
     <div class="card-title-row"><h3 class="card-title">Reset</h3></div>
-    <p class="small-note">Verwijdert alle lokale data op dit toestel.</p>
+    <p class="small-note">Verwijdert alle lokale data op dit toestel. Je Dropbox-back-up blijft staan.</p>
     <button class="btn btn-danger" id="reset-btn">Alles wissen</button>
   `;
   resetCard.querySelector("#reset-btn").onclick = () => {
@@ -819,50 +993,48 @@ function renderData() {
   return wrap;
 }
 
-function downloadYAML() {
-  if (typeof jsyaml === "undefined") { toast("YAML library niet geladen (geen internet)"); return; }
-  const yamlStr = jsyaml.dump(buildExportObject());
-  const blob = new Blob([yamlStr], { type: "text/yaml" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `gymlog-${todayISO()}.yaml`;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
+function renderDropboxCard(card) {
+  if (!dbxIsConnected()) {
+    card.innerHTML = `
+      <div class="card-title-row"><h3 class="card-title">Dropbox</h3></div>
+      <p class="small-note">Verbind met Dropbox zodat je logboek automatisch op de achtergrond wordt bewaard, ook als je Safari-data ooit wist.</p>
+      <div class="btn-row">
+        <button class="btn btn-accent" id="dbx-connect-btn">Verbind met Dropbox</button>
+      </div>
+    `;
+    card.querySelector("#dbx-connect-btn").onclick = () => dbxConnect();
+    return;
+  }
+
+  const statusLabel = {
+    idle: "Verbonden",
+    syncing: "Bezig met synchroniseren…",
+    synced: "Alles gesynchroniseerd",
+    error: "Synchroniseren mislukt, probeert opnieuw bij volgende wijziging"
+  }[dbxSyncStatus] || "Verbonden";
+  const lastSyncRaw = localStorage.getItem(DBX_LS.lastSync);
+  const lastSyncLabel = lastSyncRaw
+    ? ` · laatst gelukt ${new Date(parseInt(lastSyncRaw, 10)).toLocaleTimeString("nl-NL", { hour: "2-digit", minute: "2-digit" })}`
+    : "";
+
+  card.innerHTML = `
+    <div class="card-title-row">
+      <h3 class="card-title">Dropbox</h3>
+      <span class="dbx-dot dbx-${dbxSyncStatus}"></span>
+    </div>
+    <p class="small-note">${statusLabel}${lastSyncLabel}</p>
+    <div class="btn-row">
+      <button class="btn" id="dbx-sync-now-btn">Nu synchroniseren</button>
+      <button class="btn btn-danger" id="dbx-disconnect-btn">Loskoppelen</button>
+    </div>
+  `;
+  card.querySelector("#dbx-sync-now-btn").onclick = () => doDropboxSync(true);
+  card.querySelector("#dbx-disconnect-btn").onclick = () => {
+    if (!confirm("Dropbox loskoppelen? Lokale data blijft staan, alleen de automatische back-up stopt.")) return;
+    dbxDisconnect();
+  };
 }
 
-function importYAML(parsed) {
-  if (!parsed) return;
-  if (parsed.library) state.library = parsed.library;
-  if (parsed.schema) state.schedule = parsed.schema;
-  if (parsed.workouts) {
-    Object.entries(parsed.workouts).forEach(([iso, entry]) => {
-      const day = getDayLog(iso, true);
-      if (entry.oefeningen) {
-        Object.entries(entry.oefeningen).forEach(([name, sets]) => {
-          const ex = [...state.library.strength, ...state.library.core].find((e) => e.name === name);
-          if (!ex) return;
-          const arr = Object.values(sets).map((v) => parseSetString(v));
-          day.strength[ex.id] = arr;
-        });
-      }
-      if (entry.buikspier_kwartier) {
-        Object.entries(entry.buikspier_kwartier).forEach(([name, sets]) => {
-          const ex = [...state.library.strength, ...state.library.core].find((e) => e.name === name);
-          if (!ex) return;
-          const arr = Object.values(sets).map((v) => parseSetString(v));
-          day.core[ex.id] = arr;
-          const sel = state.coreSelectionByDate[iso] || [];
-          if (!sel.includes(ex.id)) sel.push(ex.id);
-          state.coreSelectionByDate[iso] = sel;
-        });
-      }
-    });
-  }
-  saveState();
-}
 function parseSetString(v) {
   const secMatch = /^([\d.]+)\s*sec$/i.exec(v);
   if (secMatch) return { amount: parseFloat(secMatch[1]), weight: 0 };
@@ -871,5 +1043,38 @@ function parseSetString(v) {
   return { amount: "", weight: "" };
 }
 
+/* applies one exported day-entry (as produced by buildExportObject) onto state.logs */
+function applyWorkoutDay(iso, entry) {
+  const day = getDayLog(iso, true);
+  if (entry.oefeningen) {
+    Object.entries(entry.oefeningen).forEach(([name, sets]) => {
+      const ex = [...state.library.strength, ...state.library.core].find((e) => e.name === name);
+      if (!ex) return;
+      day.strength[ex.id] = Object.values(sets).map(parseSetString);
+    });
+  }
+  if (entry.buikspier_kwartier) {
+    Object.entries(entry.buikspier_kwartier).forEach(([name, sets]) => {
+      const ex = [...state.library.strength, ...state.library.core].find((e) => e.name === name);
+      if (!ex) return;
+      day.core[ex.id] = Object.values(sets).map(parseSetString);
+      const sel = state.coreSelectionByDate[iso] || [];
+      if (!sel.includes(ex.id)) sel.push(ex.id);
+      state.coreSelectionByDate[iso] = sel;
+    });
+  }
+}
+
 /* ---------- init ---------- */
 render();
+initDropboxSync();
+
+async function initDropboxSync() {
+  if (new URLSearchParams(window.location.search).has("code")) {
+    await dbxHandleRedirect();
+    render();
+  } else if (dbxIsConnected()) {
+    await dbxPullAndMerge();
+    render();
+  }
+}
