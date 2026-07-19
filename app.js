@@ -576,6 +576,41 @@ function deleteExerciseFromLibrary(id) {
   toast("Oefening verwijderd");
 }
 
+/* merges sourceId into targetId: moves all logged sets (per date, appended
+   after any sets already on targetId that day so nothing is lost), repoints
+   schedule entries to targetId (dropping the source entry instead if that
+   day already has targetId, to avoid a duplicate card), then removes
+   sourceId from the library. */
+function mergeExercises(sourceId, targetId) {
+  const source = findExercise(sourceId);
+  const target = findExercise(targetId);
+  if (!source || !target || sourceId === targetId) return;
+
+  Object.values(state.logs).forEach((day) => {
+    if (!day[sourceId]) return;
+    day[targetId] = (day[targetId] || []).concat(day[sourceId]);
+    delete day[sourceId];
+  });
+
+  Object.keys(state.schedule).forEach((dayCode) => {
+    const list = state.schedule[dayCode];
+    const hasTargetAlready = list.some((entry) => entry.exerciseId === targetId);
+    state.schedule[dayCode] = list.reduce((acc, entry) => {
+      if (entry.exerciseId === sourceId) {
+        if (!hasTargetAlready) acc.push({ ...entry, exerciseId: targetId });
+      } else {
+        acc.push(entry);
+      }
+      return acc;
+    }, []);
+  });
+
+  state.library = state.library.filter((e) => e.id !== sourceId);
+  saveState();
+  render();
+  toast(`Samengevoegd met "${target.name}"`);
+}
+
 /* =========================================================
    SCHEMA VIEW
    ========================================================= */
@@ -688,12 +723,27 @@ function renderSchema() {
     libraryCard.appendChild(emptyState("Nog geen oefeningen."));
   } else {
     state.library.forEach((ex) => {
+      const others = state.library.filter((e) => e.id !== ex.id);
       const row = document.createElement("div");
       row.className = "exercise-edit-row";
       row.innerHTML = `
-        <div class="exercise-edit-name">${ex.name}</div>
+        <div class="exercise-edit-name">
+          ${ex.name}<br/>
+          <select class="merge-select">
+            <option value="">Samenvoegen met…</option>
+            ${others.map((e) => `<option value="${e.id}">${e.name}</option>`).join("")}
+          </select>
+        </div>
+        <button class="btn btn-sm merge-btn" title="Samenvoegen met gekozen oefening">⇄</button>
         <button class="btn btn-sm btn-danger delete-lib-ex" title="Oefening definitief verwijderen">🗑</button>
       `;
+      row.querySelector(".merge-btn").onclick = () => {
+        const targetId = row.querySelector(".merge-select").value;
+        if (!targetId) { toast("Kies eerst een oefening om mee samen te voegen"); return; }
+        const target = findExercise(targetId);
+        if (!confirm(`"${ex.name}" samenvoegen met "${target.name}"? Alle gelogde data van "${ex.name}" wordt overgezet naar "${target.name}", en "${ex.name}" verdwijnt daarna uit je lijst.`)) return;
+        mergeExercises(ex.id, targetId);
+      };
       row.querySelector(".delete-lib-ex").onclick = () => deleteExerciseFromLibrary(ex.id);
       libraryCard.appendChild(row);
     });
