@@ -236,7 +236,6 @@ async function dbxHandleRedirect() {
     localStorage.setItem(DBX_LS.access, data.access_token);
     localStorage.setItem(DBX_LS.expiry, String(Date.now() + data.expires_in * 1000 - 60000));
     toast("Verbonden met Dropbox");
-    await dbxPullAndMerge();
     await doDropboxSync(false);
   } catch (e) {
     toast("Dropbox-koppeling mislukt");
@@ -305,11 +304,16 @@ async function doDropboxSync(manual) {
   dbxSyncStatus = "syncing";
   updateDropboxStatusUI();
   try {
+    /* pull+merge first so a second device's changes (that this tab hasn't
+       seen since it was loaded) get absorbed before we push — otherwise
+       our upload would silently overwrite them. */
+    await dbxPullAndMerge();
+    clearTimeout(dbxSyncTimer); // the pull's own saveState() may have re-armed the debounce timer
     const yamlStr = jsyaml.dump(buildExportObject());
     const ok = await dbxUpload(yamlStr);
     dbxSyncStatus = ok ? "synced" : "error";
     if (ok) localStorage.setItem(DBX_LS.lastSync, String(Date.now()));
-    if (manual) toast(ok ? "Gesynchroniseerd met Dropbox" : "Synchroniseren mislukt");
+    if (manual) { toast(ok ? "Gesynchroniseerd met Dropbox" : "Synchroniseren mislukt"); render(); }
   } catch (e) {
     dbxSyncStatus = "error";
     if (manual) toast("Synchroniseren mislukt (geen internet?)");
