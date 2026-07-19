@@ -9,26 +9,16 @@ function uid(prefix) {
 
 function defaultState() {
   return {
-    library: {
-      strength: [
-        { id: "ex_bench", name: "Bench Press (Dumbbell)", unit: "reps" },
-        { id: "ex_row", name: "Seated Cable Row", unit: "reps" },
-        { id: "ex_incline", name: "Incline Dumbbell Press", unit: "reps" },
-        { id: "ex_curl", name: "Bicep Curl", unit: "reps" },
-        { id: "ex_shoulder", name: "Dumbbell Shoulder Press", unit: "reps" },
-        { id: "ex_lat", name: "Lat Pulldown", unit: "reps" },
-        { id: "ex_dbbench", name: "Dumbbell Bench Press", unit: "reps" },
-        { id: "ex_tricep", name: "Tricep Pushdown", unit: "reps" }
-      ],
-      core: [
-        { id: "core_plank", name: "Plank", unit: "seconds" },
-        { id: "core_legraise", name: "Leg Raises", unit: "reps" },
-        { id: "core_bicycle", name: "Bicycle Crunch", unit: "reps" },
-        { id: "core_mountain", name: "Mountain Climbers", unit: "reps" },
-        { id: "core_hollow", name: "Hollow Hold", unit: "seconds" },
-        { id: "core_russian", name: "Russian Twists", unit: "reps" }
-      ]
-    },
+    library: [
+      { id: "ex_bench", name: "Bench Press (Dumbbell)", unit: "reps" },
+      { id: "ex_row", name: "Seated Cable Row", unit: "reps" },
+      { id: "ex_incline", name: "Incline Dumbbell Press", unit: "reps" },
+      { id: "ex_curl", name: "Bicep Curl", unit: "reps" },
+      { id: "ex_shoulder", name: "Dumbbell Shoulder Press", unit: "reps" },
+      { id: "ex_lat", name: "Lat Pulldown", unit: "reps" },
+      { id: "ex_dbbench", name: "Dumbbell Bench Press", unit: "reps" },
+      { id: "ex_tricep", name: "Tricep Pushdown", unit: "reps" }
+    ],
     schedule: {
       Ma: [
         { exerciseId: "ex_bench", target: "4x8-10" },
@@ -49,8 +39,7 @@ function defaultState() {
         { exerciseId: "ex_curl", target: "3x12" }
       ]
     },
-    logs: {},
-    coreSelectionByDate: {}
+    logs: {}
   };
 }
 
@@ -65,15 +54,33 @@ function loadState() {
     if (!raw) return defaultState();
     const parsed = JSON.parse(raw);
     const def = defaultState();
-    return {
+    return migrateLegacyState({
       library: parsed.library || def.library,
       schedule: parsed.schedule || def.schedule,
-      logs: parsed.logs || {},
-      coreSelectionByDate: parsed.coreSelectionByDate || {}
-    };
+      logs: parsed.logs || {}
+    });
   } catch (e) {
     return defaultState();
   }
+}
+
+/* older saves had a separate "buikspier" concept: library.{strength,core}
+   and logs[iso].{strength,core}. Fold everything into one flat exercise
+   list / flat per-day log so no history gets silently dropped. */
+function migrateLegacyState(s) {
+  if (s.library && !Array.isArray(s.library)) {
+    const merged = [...(s.library.strength || [])];
+    const ids = new Set(merged.map((e) => e.id));
+    (s.library.core || []).forEach((e) => { if (!ids.has(e.id)) merged.push(e); });
+    s.library = merged;
+  }
+  Object.keys(s.logs).forEach((iso) => {
+    const day = s.logs[iso];
+    if (day && (day.strength || day.core)) {
+      s.logs[iso] = { ...(day.strength || {}), ...(day.core || {}) };
+    }
+  });
+  return s;
 }
 
 function saveState() {
@@ -111,11 +118,7 @@ function formatDateNL(iso) {
 
 /* ---------- Exercise lookup ---------- */
 function findExercise(id) {
-  return (
-    state.library.strength.find((e) => e.id === id) ||
-    state.library.core.find((e) => e.id === id) ||
-    null
-  );
+  return state.library.find((e) => e.id === id) || null;
 }
 function parseTarget(target) {
   const m = /^(\d+)\s*x\s*([\d–\-]+)/i.exec(target || "");
@@ -127,28 +130,27 @@ function parseTarget(target) {
 function getDayLog(iso, create) {
   if (!state.logs[iso]) {
     if (!create) return null;
-    state.logs[iso] = { strength: {}, core: {} };
+    state.logs[iso] = {};
   }
   return state.logs[iso];
 }
-function getSets(iso, group, exerciseId) {
+function getSets(iso, exerciseId) {
   const day = getDayLog(iso, false);
-  if (!day || !day[group] || !day[group][exerciseId]) return [];
-  return day[group][exerciseId];
+  if (!day || !day[exerciseId]) return [];
+  return day[exerciseId];
 }
-function setSets(iso, group, exerciseId, sets) {
+function setSets(iso, exerciseId, sets) {
   const day = getDayLog(iso, true);
-  if (!day[group]) day[group] = {};
-  day[group][exerciseId] = sets;
+  day[exerciseId] = sets;
   saveState();
 }
 
 /* history max weight for PR detection, excludes given iso */
-function historicalMaxWeight(group, exerciseId, excludeIso) {
+function historicalMaxWeight(exerciseId, excludeIso) {
   let max = 0;
   for (const iso in state.logs) {
     if (iso === excludeIso) continue;
-    const sets = (state.logs[iso][group] || {})[exerciseId] || [];
+    const sets = state.logs[iso][exerciseId] || [];
     for (const s of sets) {
       if (s.weight > max) max = s.weight;
     }
@@ -339,11 +341,12 @@ async function doDropboxSync(manual) {
    so a partially-synced day never gets clobbered mid-edit */
 function mergeRemoteIntoLocal(remoteObj) {
   if (!remoteObj) return;
-  ["strength", "core"].forEach((group) => {
-    const remoteList = (remoteObj.library && remoteObj.library[group]) || [];
-    const localList = state.library[group];
-    const localIds = new Set(localList.map((e) => e.id));
-    remoteList.forEach((e) => { if (!localIds.has(e.id)) localList.push(e); });
+  const remoteLibrary = Array.isArray(remoteObj.library)
+    ? remoteObj.library
+    : [...((remoteObj.library && remoteObj.library.strength) || []), ...((remoteObj.library && remoteObj.library.core) || [])];
+  const localIds = new Set(state.library.map((e) => e.id));
+  remoteLibrary.forEach((e) => {
+    if (!localIds.has(e.id)) { state.library.push(e); localIds.add(e.id); }
   });
   if (remoteObj.schema) {
     Object.keys(remoteObj.schema).forEach((day) => {
@@ -441,11 +444,6 @@ function renderToday() {
   wrap.appendChild(label);
 
   if (dayCode) {
-    const secLabel = document.createElement("div");
-    secLabel.className = "section-label";
-    secLabel.textContent = "Sportschool";
-    wrap.appendChild(secLabel);
-
     const list = state.schedule[dayCode] || [];
     if (list.length === 0) {
       wrap.appendChild(emptyState("Nog geen oefeningen voor deze dag. Voeg ze toe via Schema."));
@@ -453,26 +451,22 @@ function renderToday() {
     list.forEach((entry) => {
       const ex = findExercise(entry.exerciseId);
       if (!ex) return;
-      wrap.appendChild(renderExerciseCard("strength", ex, entry.target));
+      wrap.appendChild(renderExerciseCard(ex, entry.target));
     });
+  } else {
+    wrap.appendChild(emptyState("Geen sportschool schema vandaag."));
   }
-
-  const coreLabel = document.createElement("div");
-  coreLabel.className = "section-label";
-  coreLabel.textContent = "Buikspier kwartier";
-  wrap.appendChild(coreLabel);
-  wrap.appendChild(renderCoreSection());
 
   return wrap;
 }
 
-function renderExerciseCard(group, ex, target) {
+function renderExerciseCard(ex, target) {
   const card = document.createElement("div");
   card.className = "card";
   const { sets: targetSets, repsLabel } = parseTarget(target || (ex.unit === "seconds" ? "2x12" : "3x10-12"));
-  const existing = getSets(currentDate, group, ex.id);
+  const existing = getSets(currentDate, ex.id);
   const rowCount = Math.max(existing.length, targetSets);
-  const maxBefore = historicalMaxWeight(group, ex.id, currentDate);
+  const maxBefore = historicalMaxWeight(ex.id, currentDate);
 
   card.innerHTML = `
     <div class="card-title-row">
@@ -492,7 +486,7 @@ function renderExerciseCard(group, ex, target) {
 
   function buildRows() {
     rowsWrap.innerHTML = "";
-    const sets = getSets(currentDate, group, ex.id);
+    const sets = getSets(currentDate, ex.id);
     const n = Math.max(sets.length, targetSets);
     let anyPR = false;
     for (let i = 0; i < n; i++) {
@@ -511,13 +505,13 @@ function renderExerciseCard(group, ex, target) {
       if (s.weight && s.weight > maxBefore) { weightInput.classList.add("pr"); anyPR = true; }
 
       function commit() {
-        const currentSets = getSets(currentDate, group, ex.id);
+        const currentSets = getSets(currentDate, ex.id);
         while (currentSets.length < n) currentSets.push({ amount: "", weight: "" });
         currentSets[i] = {
           amount: amountInput.value === "" ? "" : parseFloat(amountInput.value),
           weight: weightInput.value === "" ? "" : parseFloat(weightInput.value)
         };
-        setSets(currentDate, group, ex.id, currentSets);
+        setSets(currentDate, ex.id, currentSets);
         const w = parseFloat(weightInput.value);
         const isPR = !isNaN(w) && w > 0 && w > maxBefore;
         weightInput.classList.toggle("pr", isPR);
@@ -527,9 +521,9 @@ function renderExerciseCard(group, ex, target) {
       weightInput.oninput = commit;
 
       row.querySelector(".set-remove").onclick = () => {
-        const currentSets = getSets(currentDate, group, ex.id);
+        const currentSets = getSets(currentDate, ex.id);
         currentSets.splice(i, 1);
-        setSets(currentDate, group, ex.id, currentSets);
+        setSets(currentDate, ex.id, currentSets);
         buildRows();
       };
 
@@ -539,9 +533,9 @@ function renderExerciseCard(group, ex, target) {
   }
 
   card.querySelector(".add-set-btn").onclick = () => {
-    const currentSets = getSets(currentDate, group, ex.id);
+    const currentSets = getSets(currentDate, ex.id);
     currentSets.push({ amount: "", weight: "" });
-    setSets(currentDate, group, ex.id, currentSets);
+    setSets(currentDate, ex.id, currentSets);
     buildRows();
   };
 
@@ -560,42 +554,6 @@ function updatePRBadge(card) {
   } else if (!hasPR && badge) {
     badge.remove();
   }
-}
-
-function renderCoreSection() {
-  const wrap = document.createElement("div");
-  const selected = state.coreSelectionByDate[currentDate] || [];
-
-  const chipRow = document.createElement("div");
-  chipRow.className = "btn-row";
-  chipRow.style.marginBottom = "14px";
-  state.library.core.forEach((ex) => {
-    const chip = document.createElement("button");
-    chip.className = "btn btn-sm" + (selected.includes(ex.id) ? " chip-active" : "");
-    chip.textContent = ex.name;
-    chip.onclick = () => {
-      const cur = state.coreSelectionByDate[currentDate] || [];
-      const idx = cur.indexOf(ex.id);
-      if (idx >= 0) cur.splice(idx, 1);
-      else cur.push(ex.id);
-      state.coreSelectionByDate[currentDate] = cur;
-      saveState();
-      render();
-    };
-    chipRow.appendChild(chip);
-  });
-  wrap.appendChild(chipRow);
-
-  if (selected.length === 0) {
-    wrap.appendChild(emptyState("Kies hierboven welke oefeningen je vandaag doet."));
-  } else {
-    selected.forEach((id) => {
-      const ex = findExercise(id);
-      if (!ex) return;
-      wrap.appendChild(renderExerciseCard("core", ex, "2x12"));
-    });
-  }
-  return wrap;
 }
 
 function emptyState(text) {
@@ -672,7 +630,7 @@ function renderSchema() {
     <div class="field-row">
       <select id="existing-ex-select">
         <option value="">— kies —</option>
-        ${state.library.strength.map((e) => `<option value="${e.id}">${e.name}</option>`).join("")}
+        ${state.library.map((e) => `<option value="${e.id}">${e.name}</option>`).join("")}
       </select>
     </div>
     <label class="field-label">Target (bijv. 3x10-12)</label>
@@ -702,49 +660,12 @@ function renderSchema() {
     const target = addCard.querySelector("#new-ex-target").value.trim() || "3x10-12";
     if (!name) { toast("Vul een naam in"); return; }
     const id = uid("ex");
-    state.library.strength.push({ id, name, unit: "reps" });
+    state.library.push({ id, name, unit: "reps" });
     state.schedule[activeSchemaDay].push({ exerciseId: id, target });
     saveState(); render();
     toast("Oefening aangemaakt en toegevoegd");
   };
   wrap.appendChild(addCard);
-
-  const coreCard = document.createElement("div");
-  coreCard.className = "card";
-  coreCard.innerHTML = `<div class="card-title-row"><h3 class="card-title">Buikspier bibliotheek</h3></div>`;
-  state.library.core.forEach((ex, idx) => {
-    const row = document.createElement("div");
-    row.className = "exercise-edit-row";
-    row.innerHTML = `
-      <div class="exercise-edit-name">${ex.name} <span class="exercise-edit-target">(${ex.unit === "seconds" ? "sec" : "reps"})</span></div>
-      <button class="btn btn-sm btn-danger remove-core">✕</button>
-    `;
-    row.querySelector(".remove-core").onclick = () => {
-      state.library.core.splice(idx, 1);
-      saveState(); render();
-    };
-    coreCard.appendChild(row);
-  });
-  const addCoreRow = document.createElement("div");
-  addCoreRow.className = "field-row";
-  addCoreRow.style.marginTop = "10px";
-  addCoreRow.innerHTML = `
-    <input id="new-core-name" placeholder="Naam oefening" />
-    <select id="new-core-unit">
-      <option value="reps">reps</option>
-      <option value="seconds">seconden</option>
-    </select>
-    <button class="btn btn-accent" id="add-core-btn">+</button>
-  `;
-  addCoreRow.querySelector("#add-core-btn").onclick = () => {
-    const name = addCoreRow.querySelector("#new-core-name").value.trim();
-    const unit = addCoreRow.querySelector("#new-core-unit").value;
-    if (!name) { toast("Vul een naam in"); return; }
-    state.library.core.push({ id: uid("core"), name, unit });
-    saveState(); render();
-  };
-  coreCard.appendChild(addCoreRow);
-  wrap.appendChild(coreCard);
 
   return wrap;
 }
@@ -758,9 +679,7 @@ let volumeChartInstance = null;
 function allExercisesWithLogs() {
   const ids = new Set();
   for (const iso in state.logs) {
-    const day = state.logs[iso];
-    Object.keys(day.strength || {}).forEach((id) => ids.add(id));
-    Object.keys(day.core || {}).forEach((id) => ids.add(id));
+    Object.keys(state.logs[iso]).forEach((id) => ids.add(id));
   }
   return [...ids].map((id) => findExercise(id)).filter(Boolean);
 }
@@ -797,7 +716,7 @@ function renderStats() {
       if (typeof Chart === "undefined") return;
       const points = [];
       Object.keys(state.logs).sort().forEach((iso) => {
-        const sets = (state.logs[iso].strength || {})[exId] || (state.logs[iso].core || {})[exId] || [];
+        const sets = state.logs[iso][exId] || [];
         const weights = sets.map((s) => s.weight).filter((w) => typeof w === "number" && !isNaN(w));
         const amounts = sets.map((s) => s.amount).filter((a) => typeof a === "number" && !isNaN(a));
         if (weights.length && Math.max(...weights) > 0) points.push({ x: iso, y: Math.max(...weights), label: "kg" });
@@ -846,14 +765,11 @@ function renderStats() {
     const isos = Object.keys(state.logs).sort();
     const volumes = isos.map((iso) => {
       let total = 0;
-      const day = state.logs[iso];
-      ["strength", "core"].forEach((group) => {
-        Object.values(day[group] || {}).forEach((sets) => {
-          sets.forEach((s) => {
-            if (typeof s.amount === "number" && typeof s.weight === "number" && s.weight > 0) {
-              total += s.amount * s.weight;
-            }
-          });
+      Object.values(state.logs[iso]).forEach((sets) => {
+        sets.forEach((s) => {
+          if (typeof s.amount === "number" && typeof s.weight === "number" && s.weight > 0) {
+            total += s.amount * s.weight;
+          }
         });
       });
       return total;
@@ -880,15 +796,14 @@ function renderStats() {
   const lastCard = document.createElement("div");
   lastCard.className = "card";
   lastCard.innerHTML = `<div class="card-title-row"><h3 class="card-title">Laatste keer per oefening</h3></div>`;
-  const allEx = [...state.library.strength, ...state.library.core];
-  const rows = allEx.map((ex) => {
+  const rows = state.library.map((ex) => {
     let lastIso = null;
     Object.keys(state.logs).sort().forEach((iso) => {
-      const sets = (state.logs[iso].strength || {})[ex.id] || (state.logs[iso].core || {})[ex.id];
+      const sets = state.logs[iso][ex.id];
       if (sets && sets.length) lastIso = iso;
     });
     if (!lastIso) return null;
-    const sets = (state.logs[lastIso].strength || {})[ex.id] || (state.logs[lastIso].core || {})[ex.id];
+    const sets = state.logs[lastIso][ex.id];
     const summary = sets
       .filter((s) => s.amount !== "" && s.amount != null)
       .map((s) => (s.weight ? `${s.amount}x${s.weight}kg` : `${s.amount}`))
@@ -926,7 +841,7 @@ function buildExportObject() {
     if (dayCode) entry.dag = DAY_LABEL[dayCode];
 
     const oefeningen = {};
-    Object.entries(day.strength || {}).forEach(([exId, sets]) => {
+    Object.entries(day).forEach(([exId, sets]) => {
       const ex = findExercise(exId);
       if (!ex) return;
       const setsObj = {};
@@ -939,21 +854,6 @@ function buildExportObject() {
       if (Object.keys(setsObj).length) oefeningen[ex.name] = setsObj;
     });
     if (Object.keys(oefeningen).length) entry.oefeningen = oefeningen;
-
-    const buik = {};
-    Object.entries(day.core || {}).forEach(([exId, sets]) => {
-      const ex = findExercise(exId);
-      if (!ex) return;
-      const setsObj = {};
-      sets.forEach((s, i) => {
-        if (s.amount === "" || s.amount == null) return;
-        setsObj[`Rep ${i + 1}`] = ex.unit === "seconds"
-          ? `${s.amount} sec`
-          : `${s.amount} x ${s.weight || 0} kg`;
-      });
-      if (Object.keys(setsObj).length) buik[ex.name] = setsObj;
-    });
-    if (Object.keys(buik).length) entry.buikspier_kwartier = buik;
 
     if (Object.keys(entry).length) workouts[iso] = entry;
   });
@@ -1043,26 +943,29 @@ function parseSetString(v) {
   return { amount: "", weight: "" };
 }
 
-/* applies one exported day-entry (as produced by buildExportObject) onto state.logs */
+/* looks up an exercise by name, auto-creating it if the library doesn't
+   have it yet (instead of silently dropping the logged sets) */
+function findOrCreateExerciseByName(name, rawValues) {
+  let ex = state.library.find((e) => e.name === name);
+  if (ex) return ex;
+  const looksLikeSeconds = rawValues.length > 0 && rawValues.every((v) => /^[\d.]+\s*sec$/i.test(String(v).trim()));
+  ex = { id: uid("ex"), name, unit: looksLikeSeconds ? "seconds" : "reps" };
+  state.library.push(ex);
+  return ex;
+}
+
+/* applies one exported day-entry (as produced by buildExportObject) onto state.logs.
+   "buikspier_kwartier" is the old separate-abs-section key from before that feature
+   was removed; still understood here so older Dropbox backups keep working. */
 function applyWorkoutDay(iso, entry) {
   const day = getDayLog(iso, true);
-  if (entry.oefeningen) {
-    Object.entries(entry.oefeningen).forEach(([name, sets]) => {
-      const ex = [...state.library.strength, ...state.library.core].find((e) => e.name === name);
-      if (!ex) return;
-      day.strength[ex.id] = Object.values(sets).map(parseSetString);
+  [entry.oefeningen, entry.buikspier_kwartier].filter(Boolean).forEach((section) => {
+    Object.entries(section).forEach(([name, sets]) => {
+      const rawValues = Object.values(sets);
+      const ex = findOrCreateExerciseByName(name, rawValues);
+      day[ex.id] = rawValues.map(parseSetString);
     });
-  }
-  if (entry.buikspier_kwartier) {
-    Object.entries(entry.buikspier_kwartier).forEach(([name, sets]) => {
-      const ex = [...state.library.strength, ...state.library.core].find((e) => e.name === name);
-      if (!ex) return;
-      day.core[ex.id] = Object.values(sets).map(parseSetString);
-      const sel = state.coreSelectionByDate[iso] || [];
-      if (!sel.includes(ex.id)) sel.push(ex.id);
-      state.coreSelectionByDate[iso] = sel;
-    });
-  }
+  });
 }
 
 /* ---------- init ---------- */

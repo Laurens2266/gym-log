@@ -1,6 +1,6 @@
 # Gym Log
 
-Statische PWA, geen backend nodig. Data staat lokaal op je iPhone (localStorage), export/import gaat via YAML.
+Statische PWA, geen backend nodig. Data staat lokaal op je iPhone (localStorage) en wordt automatisch op de achtergrond gesynchroniseerd naar je eigen Dropbox (YAML), zodat je 'm niet kwijtraakt.
 
 ## Hosten (zelfde manier als je andere subdomains op lapesoftware.nl)
 
@@ -17,12 +17,12 @@ Statische PWA, geen backend nodig. Data staat lokaal op je iPhone (localStorage)
 
 ## Gebruik
 
-- **Vandaag**: toont automatisch het schema van die dag (Ma/Wo/Vr) op basis van de datum. Vul per set de reps/seconden en het gewicht in. Groen randje = nieuw record (zwaarder dan ooit eerder bij die oefening). Buikspier kwartier staat los, kies per dag welke oefeningen je doet.
-- **Schema**: oefeningen toevoegen/verwijderen/herordenen per dag, target aanpassen, nieuwe oefeningen aanmaken. Buikspier-bibliotheek los beheren.
+- **Vandaag**: toont automatisch het schema van die dag (Ma/Wo/Vr) op basis van de datum. Vul per set de reps/seconden en het gewicht in. Groen randje = nieuw record (zwaarder dan ooit eerder bij die oefening).
+- **Schema**: oefeningen toevoegen/verwijderen/herordenen per dag, target aanpassen, nieuwe oefeningen aanmaken.
 - **Stats**: grafiek per oefening (max gewicht over tijd), totaal volume per workout, overzicht laatste keer per oefening.
-- **Data**: YAML downloaden of tonen om te kopiëren/plakken (bijv. naar Dropbox via het deel-menu), en YAML terug importeren.
+- **Data**: Dropbox-koppeling (status + handmatig "nu synchroniseren") en een reset-knop voor lokale data.
 
 ## Belangrijk
 
-- Alles wordt lokaal op je toestel opgeslagen. Als je Safari-data wist of van toestel wisselt, ben je je logs kwijt tenzij je eerst een YAML-export hebt gedownload.
-- Stats en export/import hebben internet nodig (laden Chart.js / js-yaml van een CDN). Sets loggen tijdens het sporten werkt altijd, ook offline.
+- Alles wordt lokaal op je toestel opgeslagen en na elke wijziging op de achtergrond naar je eigen Dropbox-app-folder gesynchroniseerd. Zonder Dropbox-koppeling ben je je logs kwijt als je Safari-data wist of van toestel wisselt.
+- Stats en Dropbox-sync hebben internet nodig (laden Chart.js / js-yaml van een CDN). Sets loggen tijdens het sporten werkt altijd, ook offline — de sync haalt dat vanzelf in zodra je weer online bent.

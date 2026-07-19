@@ -153,12 +153,6 @@ button { font-family: inherit; }
 }
 @keyframes pop { from { transform: scale(0.6); opacity: 0; } to { transform: scale(1); opacity: 1; } }
 
-.section-label {
-  font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em;
-  color: var(--text-dim); font-weight: 700; margin: 22px 0 10px;
-}
-.section-label:first-child { margin-top: 0; }
-
 .empty-state {
   text-align: center; color: var(--text-dim); padding: 40px 16px; font-size: 14px;
 }
@@ -185,8 +179,6 @@ label.field-label { font-size: 12px; color: var(--text-dim); display: block; mar
   border-radius: 6px; padding: 4px 6px; font-size: 12px;
 }
 .target-input:focus { outline: none; border-color: var(--accent); }
-
-.chip-active { border-color: var(--accent); color: var(--accent); }
 
 .day-picker {
   display: flex; gap: 6px; margin-bottom: 16px; overflow-x: auto;
