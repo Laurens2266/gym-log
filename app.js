@@ -1,7 +1,11 @@
 /* ---------- State ---------- */
 const STORAGE_KEY = "gymlog_state_v1";
-const DAY_CODE_BY_WEEKDAY = { 1: "Ma", 3: "Wo", 5: "Vr" };
-const DAY_LABEL = { Ma: "Maandag", Wo: "Woensdag", Vr: "Vrijdag" };
+const DAY_CODE_BY_WEEKDAY = { 0: "Zo", 1: "Ma", 2: "Di", 3: "Wo", 4: "Do", 5: "Vr", 6: "Za" };
+const DAY_ORDER = ["Ma", "Di", "Wo", "Do", "Vr", "Za", "Zo"];
+const DAY_LABEL = {
+  Ma: "Maandag", Di: "Dinsdag", Wo: "Woensdag", Do: "Donderdag",
+  Vr: "Vrijdag", Za: "Zaterdag", Zo: "Zondag"
+};
 
 function uid(prefix) {
   return prefix + "_" + Math.random().toString(36).slice(2, 9);
@@ -9,36 +13,8 @@ function uid(prefix) {
 
 function defaultState() {
   return {
-    library: [
-      { id: "ex_bench", name: "Bench Press (Dumbbell)", unit: "reps" },
-      { id: "ex_row", name: "Seated Cable Row", unit: "reps" },
-      { id: "ex_incline", name: "Incline Dumbbell Press", unit: "reps" },
-      { id: "ex_curl", name: "Bicep Curl", unit: "reps" },
-      { id: "ex_shoulder", name: "Dumbbell Shoulder Press", unit: "reps" },
-      { id: "ex_lat", name: "Lat Pulldown", unit: "reps" },
-      { id: "ex_dbbench", name: "Dumbbell Bench Press", unit: "reps" },
-      { id: "ex_tricep", name: "Tricep Pushdown", unit: "reps" }
-    ],
-    schedule: {
-      Ma: [
-        { exerciseId: "ex_bench", target: "4x8-10" },
-        { exerciseId: "ex_row", target: "3x10-12" },
-        { exerciseId: "ex_incline", target: "3x8-10" },
-        { exerciseId: "ex_curl", target: "3x10-12" }
-      ],
-      Wo: [
-        { exerciseId: "ex_shoulder", target: "3x8-10" },
-        { exerciseId: "ex_lat", target: "3x10-12" },
-        { exerciseId: "ex_dbbench", target: "3x8-10" },
-        { exerciseId: "ex_tricep", target: "3x10-12" }
-      ],
-      Vr: [
-        { exerciseId: "ex_bench", target: "4x8" },
-        { exerciseId: "ex_incline", target: "3x10" },
-        { exerciseId: "ex_lat", target: "3x10" },
-        { exerciseId: "ex_curl", target: "3x12" }
-      ]
-    },
+    library: [],
+    schedule: {},
     logs: {}
   };
 }
@@ -119,6 +95,10 @@ function formatDateNL(iso) {
 /* ---------- Exercise lookup ---------- */
 function findExercise(id) {
   return state.library.find((e) => e.id === id) || null;
+}
+function scheduleFor(dayCode) {
+  if (!state.schedule[dayCode]) state.schedule[dayCode] = [];
+  return state.schedule[dayCode];
 }
 function parseTarget(target) {
   const m = /^(\d+)\s*x\s*([\d–\-]+)/i.exec(target || "");
@@ -438,24 +418,29 @@ function renderToday() {
   const label = document.createElement("div");
   label.className = "small-note";
   label.style.marginBottom = "16px";
-  label.textContent = dayCode
-    ? `${formatDateNL(currentDate)} — schema ${DAY_LABEL[dayCode]}`
-    : `${formatDateNL(currentDate)} — geen sportschool schema vandaag`;
+  label.textContent = `${formatDateNL(currentDate)} — schema ${DAY_LABEL[dayCode]}`;
   wrap.appendChild(label);
 
-  if (dayCode) {
-    const list = state.schedule[dayCode] || [];
-    if (list.length === 0) {
-      wrap.appendChild(emptyState("Nog geen oefeningen voor deze dag. Voeg ze toe via Schema."));
-    }
-    list.forEach((entry) => {
-      const ex = findExercise(entry.exerciseId);
-      if (!ex) return;
-      wrap.appendChild(renderExerciseCard(ex, entry.target));
-    });
-  } else {
-    wrap.appendChild(emptyState("Geen sportschool schema vandaag."));
+  const list = state.schedule[dayCode] || [];
+  const scheduledIds = new Set(list.map((entry) => entry.exerciseId));
+  const loggedDay = getDayLog(currentDate, false) || {};
+  const extraIds = Object.keys(loggedDay).filter(
+    (id) => !scheduledIds.has(id) && loggedDay[id] && loggedDay[id].length
+  );
+
+  if (list.length === 0 && extraIds.length === 0) {
+    wrap.appendChild(emptyState("Nog geen oefeningen voor deze dag. Voeg ze toe via Schema."));
   }
+  list.forEach((entry) => {
+    const ex = findExercise(entry.exerciseId);
+    if (!ex) return;
+    wrap.appendChild(renderExerciseCard(ex, entry.target));
+  });
+  extraIds.forEach((id) => {
+    const ex = findExercise(id);
+    if (!ex) return;
+    wrap.appendChild(renderExerciseCard(ex, null));
+  });
 
   return wrap;
 }
@@ -487,7 +472,9 @@ function renderExerciseCard(ex, target) {
   function buildRows() {
     rowsWrap.innerHTML = "";
     const sets = getSets(currentDate, ex.id);
-    const n = Math.max(sets.length, targetSets);
+    const day = getDayLog(currentDate, false);
+    const initialized = !!(day && day[ex.id]);
+    const n = initialized ? sets.length : targetSets;
     let anyPR = false;
     for (let i = 0; i < n; i++) {
       const s = sets[i] || { amount: "", weight: "" };
@@ -522,6 +509,7 @@ function renderExerciseCard(ex, target) {
 
       row.querySelector(".set-remove").onclick = () => {
         const currentSets = getSets(currentDate, ex.id);
+        while (currentSets.length < n) currentSets.push({ amount: "", weight: "" });
         currentSets.splice(i, 1);
         setSets(currentDate, ex.id, currentSets);
         buildRows();
@@ -534,6 +522,10 @@ function renderExerciseCard(ex, target) {
 
   card.querySelector(".add-set-btn").onclick = () => {
     const currentSets = getSets(currentDate, ex.id);
+    const day = getDayLog(currentDate, false);
+    const initialized = !!(day && day[ex.id]);
+    const n = initialized ? currentSets.length : targetSets;
+    while (currentSets.length < n) currentSets.push({ amount: "", weight: "" });
     currentSets.push({ amount: "", weight: "" });
     setSets(currentDate, ex.id, currentSets);
     buildRows();
@@ -563,6 +555,27 @@ function emptyState(text) {
   return d;
 }
 
+/* removes an exercise from the library entirely, and from every day's
+   schedule. Logged history for it is left untouched in state.logs (not
+   wiped) but becomes invisible until the exercise is recreated, since
+   findExercise(id) will no longer resolve it. */
+function deleteExerciseFromLibrary(id) {
+  const ex = findExercise(id);
+  if (!ex) return;
+  const loggedDays = Object.keys(state.logs).filter((iso) => (state.logs[iso][id] || []).length);
+  const msg = loggedDays.length
+    ? `"${ex.name}" heeft gelogde data op ${loggedDays.length} dag(en). Die data blijft bewaard, maar is niet meer zichtbaar totdat je de oefening opnieuw aanmaakt. Toch verwijderen?`
+    : `"${ex.name}" definitief verwijderen?`;
+  if (!confirm(msg)) return;
+  state.library = state.library.filter((e) => e.id !== id);
+  Object.keys(state.schedule).forEach((day) => {
+    state.schedule[day] = state.schedule[day].filter((entry) => entry.exerciseId !== id);
+  });
+  saveState();
+  render();
+  toast("Oefening verwijderd");
+}
+
 /* =========================================================
    SCHEMA VIEW
    ========================================================= */
@@ -571,9 +584,10 @@ function renderSchema() {
 
   const picker = document.createElement("div");
   picker.className = "day-picker";
-  ["Ma", "Wo", "Vr"].forEach((code) => {
+  DAY_ORDER.forEach((code) => {
     const b = document.createElement("button");
-    b.textContent = DAY_LABEL[code];
+    b.textContent = code;
+    b.title = DAY_LABEL[code];
     b.className = code === activeSchemaDay ? "active" : "";
     b.onclick = () => { activeSchemaDay = code; render(); };
     picker.appendChild(b);
@@ -582,7 +596,7 @@ function renderSchema() {
 
   const card = document.createElement("div");
   card.className = "card";
-  const list = state.schedule[activeSchemaDay];
+  const list = state.schedule[activeSchemaDay] || [];
 
   if (list.length === 0) {
     card.appendChild(emptyState("Nog geen oefeningen op deze dag."));
@@ -651,7 +665,7 @@ function renderSchema() {
     const id = addCard.querySelector("#existing-ex-select").value;
     const target = addCard.querySelector("#existing-target").value.trim() || "3x10-12";
     if (!id) { toast("Kies eerst een oefening"); return; }
-    state.schedule[activeSchemaDay].push({ exerciseId: id, target });
+    scheduleFor(activeSchemaDay).push({ exerciseId: id, target });
     saveState(); render();
     toast("Toegevoegd");
   };
@@ -661,11 +675,30 @@ function renderSchema() {
     if (!name) { toast("Vul een naam in"); return; }
     const id = uid("ex");
     state.library.push({ id, name, unit: "reps" });
-    state.schedule[activeSchemaDay].push({ exerciseId: id, target });
+    scheduleFor(activeSchemaDay).push({ exerciseId: id, target });
     saveState(); render();
     toast("Oefening aangemaakt en toegevoegd");
   };
   wrap.appendChild(addCard);
+
+  const libraryCard = document.createElement("div");
+  libraryCard.className = "card";
+  libraryCard.innerHTML = `<div class="card-title-row"><h3 class="card-title">Alle oefeningen</h3></div>`;
+  if (state.library.length === 0) {
+    libraryCard.appendChild(emptyState("Nog geen oefeningen."));
+  } else {
+    state.library.forEach((ex) => {
+      const row = document.createElement("div");
+      row.className = "exercise-edit-row";
+      row.innerHTML = `
+        <div class="exercise-edit-name">${ex.name}</div>
+        <button class="btn btn-sm btn-danger delete-lib-ex" title="Oefening definitief verwijderen">🗑</button>
+      `;
+      row.querySelector(".delete-lib-ex").onclick = () => deleteExerciseFromLibrary(ex.id);
+      libraryCard.appendChild(row);
+    });
+  }
+  wrap.appendChild(libraryCard);
 
   return wrap;
 }

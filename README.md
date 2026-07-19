@@ -17,10 +17,20 @@ Statische PWA, geen backend nodig. Data staat lokaal op je iPhone (localStorage)
 
 ## Gebruik
 
-- **Vandaag**: toont automatisch het schema van die dag (Ma/Wo/Vr) op basis van de datum. Vul per set de reps/seconden en het gewicht in. Groen randje = nieuw record (zwaarder dan ooit eerder bij die oefening).
-- **Schema**: oefeningen toevoegen/verwijderen/herordenen per dag, target aanpassen, nieuwe oefeningen aanmaken.
+- **Vandaag**: toont automatisch het schema van die dag (op basis van de weekdag) op basis van de datum. Vul per set de reps/seconden en het gewicht in. Groen randje = nieuw record (zwaarder dan ooit eerder bij die oefening).
+- **Schema**: elke weekdag (Ma t/m Zo) heeft een eigen, los in te stellen lijst met oefeningen — kies zelf op welke dagen je traint. Oefeningen toevoegen/verwijderen/herordenen per dag, target aanpassen, nieuwe oefeningen aanmaken, en onderaan een oefening definitief uit je lijst verwijderen.
 - **Stats**: grafiek per oefening (max gewicht over tijd), totaal volume per workout, overzicht laatste keer per oefening.
 - **Data**: Dropbox-koppeling (status + handmatig "nu synchroniseren") en een reset-knop voor lokale data.
+
+## Meerdere gebruikers
+
+Iedereen die de URL opent krijgt zijn eigen, volledig lege app (geen gedeelde data, geen vooringevulde oefeningen). Een nieuwe gebruiker:
+
+1. Opent de URL, evt. "Zet op beginscherm".
+2. Gaat naar **Schema**, kiest per weekdag welke oefeningen hij daar wil doen (alle 7 dagen zijn los instelbaar).
+3. Koppelt optioneel zijn eigen Dropbox via **Data** — dat is zijn eigen account/app-folder, volledig los van andere gebruikers.
+
+Er hoeft niets handmatig in Dropbox gezet te worden; bij de eerste sync wordt het YAML-bestand automatisch aangemaakt.
 
 ## Belangrijk
 
