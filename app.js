@@ -556,17 +556,18 @@ function emptyState(text) {
 }
 
 /* removes an exercise from the library entirely, and from every day's
-   schedule. Logged history for it is left untouched in state.logs (not
-   wiped) but becomes invisible until the exercise is recreated, since
-   findExercise(id) will no longer resolve it. */
+   schedule. Only allowed when it has zero logged history — an exercise
+   with history should be merged into another one (mergeExercises) instead,
+   never deleted, so historical data can never be silently orphaned. */
 function deleteExerciseFromLibrary(id) {
   const ex = findExercise(id);
   if (!ex) return;
   const loggedDays = Object.keys(state.logs).filter((iso) => (state.logs[iso][id] || []).length);
-  const msg = loggedDays.length
-    ? `"${ex.name}" heeft gelogde data op ${loggedDays.length} dag(en). Die data blijft bewaard, maar is niet meer zichtbaar totdat je de oefening opnieuw aanmaakt. Toch verwijderen?`
-    : `"${ex.name}" definitief verwijderen?`;
-  if (!confirm(msg)) return;
+  if (loggedDays.length) {
+    toast(`"${ex.name}" heeft gelogde data op ${loggedDays.length} dag(en) — voeg 'm samen met een andere oefening in plaats van verwijderen`);
+    return;
+  }
+  if (!confirm(`"${ex.name}" definitief verwijderen?`)) return;
   state.library = state.library.filter((e) => e.id !== id);
   Object.keys(state.schedule).forEach((day) => {
     state.schedule[day] = state.schedule[day].filter((entry) => entry.exerciseId !== id);
