@@ -180,13 +180,6 @@ label.field-label { font-size: 12px; color: var(--text-dim); display: block; mar
 }
 .target-input:focus { outline: none; border-color: var(--accent); }
 
-.merge-select {
-  margin-top: 4px; max-width: 160px;
-  background: var(--surface-2); border: 1px solid var(--line); color: var(--text);
-  border-radius: 6px; padding: 4px 6px; font-size: 12px;
-}
-.merge-select:focus { outline: none; border-color: var(--accent); }
-
 .rename-input {
   display: block; width: 100%;
   background: var(--surface-2); border: 1px solid var(--line); color: var(--text);
@@ -229,3 +222,20 @@ label.field-label { font-size: 12px; color: var(--text-dim); display: block; mar
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
 .small-note { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+
+.modal-overlay {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, 0.6);
+  display: flex; align-items: flex-end; justify-content: center;
+  z-index: 30; padding: 16px;
+}
+.modal {
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 16px; width: 100%; max-width: 420px; max-height: 70vh; overflow-y: auto;
+}
+.modal-title { margin: 0 0 8px; font-size: 15px; font-weight: 700; }
+.modal-list { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; }
+.modal-option {
+  background: var(--surface-2); border: 1px solid var(--line); color: var(--text);
+  text-align: left; padding: 10px 12px; border-radius: 10px; font-size: 14px; cursor: pointer;
+}
+.modal-option:active { border-color: var(--accent); }

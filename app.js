@@ -625,6 +625,49 @@ function mergeExercises(sourceId, targetId) {
   toast(`Samengevoegd met "${target.name}"`);
 }
 
+function closeModal() {
+  const overlay = document.querySelector(".modal-overlay");
+  if (overlay) overlay.remove();
+}
+
+function openMergeModal(ex) {
+  const others = state.library.filter((e) => e.id !== ex.id);
+
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  overlay.onclick = (e) => { if (e.target === overlay) closeModal(); };
+
+  const modal = document.createElement("div");
+  modal.className = "modal";
+  modal.innerHTML = `
+    <h3 class="modal-title">Samenvoegen met…</h3>
+    <p class="small-note">Kies met welke oefening je "${ex.name}" wilt samenvoegen. Gelogde data wordt overgezet, "${ex.name}" verdwijnt daarna uit je lijst.</p>
+    <div class="modal-list"></div>
+    <button class="btn btn-block modal-cancel">Annuleren</button>
+  `;
+
+  const list = modal.querySelector(".modal-list");
+  if (others.length === 0) {
+    list.appendChild(emptyState("Geen andere oefeningen om mee samen te voegen."));
+  } else {
+    others.forEach((target) => {
+      const b = document.createElement("button");
+      b.className = "btn btn-block modal-option";
+      b.textContent = target.name;
+      b.onclick = () => {
+        if (!confirm(`"${ex.name}" samenvoegen met "${target.name}"? Alle gelogde data van "${ex.name}" wordt overgezet naar "${target.name}", en "${ex.name}" verdwijnt daarna uit je lijst.`)) return;
+        closeModal();
+        mergeExercises(ex.id, target.id);
+      };
+      list.appendChild(b);
+    });
+  }
+
+  modal.querySelector(".modal-cancel").onclick = () => closeModal();
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+}
+
 /* =========================================================
    SCHEMA VIEW
    ========================================================= */
@@ -737,28 +780,17 @@ function renderSchema() {
     libraryCard.appendChild(emptyState("Nog geen oefeningen."));
   } else {
     state.library.forEach((ex) => {
-      const others = state.library.filter((e) => e.id !== ex.id);
       const row = document.createElement("div");
       row.className = "exercise-edit-row";
       row.innerHTML = `
         <div class="exercise-edit-name">
           <input class="rename-input" value="${ex.name}" />
-          <select class="merge-select">
-            <option value="">Samenvoegen met…</option>
-            ${others.map((e) => `<option value="${e.id}">${e.name}</option>`).join("")}
-          </select>
         </div>
-        <button class="btn btn-sm merge-btn" title="Samenvoegen met gekozen oefening">⇄</button>
+        <button class="btn btn-sm merge-btn" title="Samenvoegen met andere oefening">Samenvoegen</button>
         <button class="btn btn-sm btn-danger delete-lib-ex" title="Oefening definitief verwijderen">🗑</button>
       `;
       row.querySelector(".rename-input").onchange = (e) => renameExercise(ex.id, e.target.value);
-      row.querySelector(".merge-btn").onclick = () => {
-        const targetId = row.querySelector(".merge-select").value;
-        if (!targetId) { toast("Kies eerst een oefening om mee samen te voegen"); return; }
-        const target = findExercise(targetId);
-        if (!confirm(`"${ex.name}" samenvoegen met "${target.name}"? Alle gelogde data van "${ex.name}" wordt overgezet naar "${target.name}", en "${ex.name}" verdwijnt daarna uit je lijst.`)) return;
-        mergeExercises(ex.id, targetId);
-      };
+      row.querySelector(".merge-btn").onclick = () => openMergeModal(ex);
       row.querySelector(".delete-lib-ex").onclick = () => deleteExerciseFromLibrary(ex.id);
       libraryCard.appendChild(row);
     });
