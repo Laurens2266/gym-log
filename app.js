@@ -555,6 +555,19 @@ function emptyState(text) {
   return d;
 }
 
+/* renaming only touches the library entry's name — schedule and logs
+   reference exercises by id, so history and schema stay linked automatically. */
+function renameExercise(id, newName) {
+  const ex = findExercise(id);
+  if (!ex) return;
+  const trimmed = newName.trim();
+  if (!trimmed || trimmed === ex.name) return;
+  ex.name = trimmed;
+  saveState();
+  render();
+  toast("Oefening hernoemd");
+}
+
 /* removes an exercise from the library entirely, and from every day's
    schedule. Only allowed when it has zero logged history — an exercise
    with history should be merged into another one (mergeExercises) instead,
@@ -729,7 +742,7 @@ function renderSchema() {
       row.className = "exercise-edit-row";
       row.innerHTML = `
         <div class="exercise-edit-name">
-          ${ex.name}<br/>
+          <input class="rename-input" value="${ex.name}" />
           <select class="merge-select">
             <option value="">Samenvoegen met…</option>
             ${others.map((e) => `<option value="${e.id}">${e.name}</option>`).join("")}
@@ -738,6 +751,7 @@ function renderSchema() {
         <button class="btn btn-sm merge-btn" title="Samenvoegen met gekozen oefening">⇄</button>
         <button class="btn btn-sm btn-danger delete-lib-ex" title="Oefening definitief verwijderen">🗑</button>
       `;
+      row.querySelector(".rename-input").onchange = (e) => renameExercise(ex.id, e.target.value);
       row.querySelector(".merge-btn").onclick = () => {
         const targetId = row.querySelector(".merge-select").value;
         if (!targetId) { toast("Kies eerst een oefening om mee samen te voegen"); return; }
