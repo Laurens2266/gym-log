@@ -15,7 +15,13 @@ function defaultState() {
   return {
     library: [],
     schedule: {},
-    logs: {}
+    logs: {},
+    /* last-modified timestamps, keyed per exercise id / schedule day / log
+       date. Used to resolve sync conflicts (newest wins) instead of the
+       old "local always wins if present" rule. Missing entries default to
+       0 (unknown/old) wherever they're read, so pre-existing data from
+       before this existed never spuriously loses to a genuine remote edit. */
+    meta: { library: {}, scheduleDays: {}, logDays: {} }
   };
 }
 
@@ -33,12 +39,17 @@ function loadState() {
     return migrateLegacyState({
       library: parsed.library || def.library,
       schedule: parsed.schedule || def.schedule,
-      logs: parsed.logs || {}
+      logs: parsed.logs || {},
+      meta: parsed.meta || def.meta
     });
   } catch (e) {
     return defaultState();
   }
 }
+
+function touchLibraryMeta(id) { state.meta.library[id] = Date.now(); }
+function touchScheduleMeta(day) { state.meta.scheduleDays[day] = Date.now(); }
+function touchLogMeta(iso) { state.meta.logDays[iso] = Date.now(); }
 
 /* older saves had a separate "buikspier" concept: library.{strength,core}
    and logs[iso].{strength,core}. Fold everything into one flat exercise
@@ -94,7 +105,14 @@ function formatDateNL(iso) {
 
 /* ---------- Exercise lookup ---------- */
 function findExercise(id) {
-  return state.library.find((e) => e.id === id) || null;
+  const ex = state.library.find((e) => e.id === id);
+  return ex && !ex.deleted ? ex : null;
+}
+/* library entries, excluding tombstoned (soft-deleted/merged-away) ones —
+   use this for anything UI-facing; use state.library directly only when
+   the raw array (including tombstones) needs to round-trip through sync. */
+function activeLibrary() {
+  return state.library.filter((e) => !e.deleted);
 }
 function scheduleFor(dayCode) {
   if (!state.schedule[dayCode]) state.schedule[dayCode] = [];
@@ -122,6 +140,7 @@ function getSets(iso, exerciseId) {
 function setSets(iso, exerciseId, sets) {
   const day = getDayLog(iso, true);
   day[exerciseId] = sets;
+  touchLogMeta(iso);
   saveState();
 }
 
@@ -321,30 +340,58 @@ async function doDropboxSync(manual) {
   updateDropboxStatusUI();
 }
 
-/* additive merge: remote fills gaps, local always wins on conflict
-   so a partially-synced day never gets clobbered mid-edit */
+/* last-write-wins merge: each library entry / schedule day / log date has
+   its own meta timestamp, and whichever side (local vs remote) touched it
+   more recently wins outright for that whole unit. Missing timestamps
+   default to 0 (unknown/old), so pre-existing data never spuriously loses
+   to a "genuine" remote edit, but a real rename/merge/delete made on any
+   device reliably reaches every other device instead of being silently
+   reverted by whichever device happens to sync next. */
 function mergeRemoteIntoLocal(remoteObj) {
   if (!remoteObj) return;
+  const remoteMeta = remoteObj.meta || { library: {}, scheduleDays: {}, logDays: {} };
+
   const remoteLibrary = Array.isArray(remoteObj.library)
     ? remoteObj.library
     : [...((remoteObj.library && remoteObj.library.strength) || []), ...((remoteObj.library && remoteObj.library.core) || [])];
   const localIds = new Set(state.library.map((e) => e.id));
-  remoteLibrary.forEach((e) => {
-    if (!localIds.has(e.id)) { state.library.push(e); localIds.add(e.id); }
+  remoteLibrary.forEach((remoteEx) => {
+    const remoteTs = remoteMeta.library[remoteEx.id] || 0;
+    const localTs = state.meta.library[remoteEx.id] || 0;
+    if (!localIds.has(remoteEx.id)) {
+      state.library.push({ ...remoteEx });
+      state.meta.library[remoteEx.id] = remoteTs;
+      localIds.add(remoteEx.id);
+    } else if (remoteTs > localTs) {
+      const idx = state.library.findIndex((e) => e.id === remoteEx.id);
+      state.library[idx] = { ...remoteEx };
+      state.meta.library[remoteEx.id] = remoteTs;
+    }
   });
+
   if (remoteObj.schema) {
     Object.keys(remoteObj.schema).forEach((day) => {
-      if (!state.schedule[day] || state.schedule[day].length === 0) {
+      const remoteTs = remoteMeta.scheduleDays[day] || 0;
+      const localTs = state.meta.scheduleDays[day] || 0;
+      if (!state.schedule[day] || remoteTs > localTs) {
         state.schedule[day] = remoteObj.schema[day];
+        state.meta.scheduleDays[day] = remoteTs;
       }
     });
   }
+
   if (remoteObj.workouts) {
     Object.entries(remoteObj.workouts).forEach(([iso, entry]) => {
-      if (state.logs[iso]) return;
-      applyWorkoutDay(iso, entry);
+      const remoteTs = remoteMeta.logDays[iso] || 0;
+      const localTs = state.meta.logDays[iso] || 0;
+      if (!state.logs[iso] || remoteTs > localTs) {
+        state.logs[iso] = {};
+        applyWorkoutDay(iso, entry);
+        state.meta.logDays[iso] = remoteTs;
+      }
     });
   }
+
   saveState();
 }
 
@@ -567,6 +614,7 @@ function renameExercise(id, newName) {
   const trimmed = newName.trim();
   if (!trimmed || trimmed === ex.name) return;
   ex.name = trimmed;
+  touchLibraryMeta(id);
   saveState();
   render();
   toast("Oefening hernoemd");
@@ -575,7 +623,10 @@ function renameExercise(id, newName) {
 /* removes an exercise from the library entirely, and from every day's
    schedule. Only allowed when it has zero logged history — an exercise
    with history should be merged into another one (mergeExercises) instead,
-   never deleted, so historical data can never be silently orphaned. */
+   never deleted, so historical data can never be silently orphaned.
+   Marked as a tombstone (deleted: true) rather than physically removed,
+   so the deletion itself can sync to other devices instead of a stale
+   device silently resurrecting it on its next push. */
 function deleteExerciseFromLibrary(id) {
   const ex = findExercise(id);
   if (!ex) return;
@@ -585,9 +636,12 @@ function deleteExerciseFromLibrary(id) {
     return;
   }
   if (!confirm(`"${ex.name}" definitief verwijderen?`)) return;
-  state.library = state.library.filter((e) => e.id !== id);
+  ex.deleted = true;
+  touchLibraryMeta(id);
   Object.keys(state.schedule).forEach((day) => {
+    const before = state.schedule[day].length;
     state.schedule[day] = state.schedule[day].filter((entry) => entry.exerciseId !== id);
+    if (state.schedule[day].length !== before) touchScheduleMeta(day);
   });
   saveState();
   render();
@@ -597,22 +651,24 @@ function deleteExerciseFromLibrary(id) {
 /* merges sourceId into targetId: moves all logged sets (per date, appended
    after any sets already on targetId that day so nothing is lost), repoints
    schedule entries to targetId (dropping the source entry instead if that
-   day already has targetId, to avoid a duplicate card), then removes
-   sourceId from the library. */
+   day already has targetId, to avoid a duplicate card), then tombstones
+   sourceId in the library (see deleteExerciseFromLibrary for why). */
 function mergeExercises(sourceId, targetId) {
   const source = findExercise(sourceId);
   const target = findExercise(targetId);
   if (!source || !target || sourceId === targetId) return;
 
-  Object.values(state.logs).forEach((day) => {
+  Object.entries(state.logs).forEach(([iso, day]) => {
     if (!day[sourceId]) return;
     day[targetId] = (day[targetId] || []).concat(day[sourceId]);
     delete day[sourceId];
+    touchLogMeta(iso);
   });
 
   Object.keys(state.schedule).forEach((dayCode) => {
     const list = state.schedule[dayCode];
     const hasTargetAlready = list.some((entry) => entry.exerciseId === targetId);
+    const touchesSource = list.some((entry) => entry.exerciseId === sourceId);
     state.schedule[dayCode] = list.reduce((acc, entry) => {
       if (entry.exerciseId === sourceId) {
         if (!hasTargetAlready) acc.push({ ...entry, exerciseId: targetId });
@@ -621,9 +677,11 @@ function mergeExercises(sourceId, targetId) {
       }
       return acc;
     }, []);
+    if (touchesSource) touchScheduleMeta(dayCode);
   });
 
-  state.library = state.library.filter((e) => e.id !== sourceId);
+  source.deleted = true;
+  touchLibraryMeta(sourceId);
   saveState();
   render();
   toast(`Samengevoegd met "${target.name}"`);
@@ -635,7 +693,7 @@ function closeModal() {
 }
 
 function openMergeModal(ex) {
-  const others = state.library.filter((e) => e.id !== ex.id);
+  const others = activeLibrary().filter((e) => e.id !== ex.id);
 
   const overlay = document.createElement("div");
   overlay.className = "modal-overlay";
@@ -714,18 +772,22 @@ function renderSchema() {
     `;
     row.querySelector(".target-input").onchange = (e) => {
       entry.target = e.target.value;
+      touchScheduleMeta(activeSchemaDay);
       saveState();
     };
     row.querySelector(".move-up").onclick = () => {
       [list[idx - 1], list[idx]] = [list[idx], list[idx - 1]];
+      touchScheduleMeta(activeSchemaDay);
       saveState(); render();
     };
     row.querySelector(".move-down").onclick = () => {
       [list[idx + 1], list[idx]] = [list[idx], list[idx + 1]];
+      touchScheduleMeta(activeSchemaDay);
       saveState(); render();
     };
     row.querySelector(".remove-ex").onclick = () => {
       list.splice(idx, 1);
+      touchScheduleMeta(activeSchemaDay);
       saveState(); render();
     };
     card.appendChild(row);
@@ -740,7 +802,7 @@ function renderSchema() {
     <div class="field-row">
       <select id="existing-ex-select">
         <option value="">— kies —</option>
-        ${state.library.map((e) => `<option value="${e.id}">${e.name}</option>`).join("")}
+        ${activeLibrary().map((e) => `<option value="${e.id}">${e.name}</option>`).join("")}
       </select>
     </div>
     <label class="field-label">Target (bijv. 3x10-12)</label>
@@ -762,6 +824,7 @@ function renderSchema() {
     const target = addCard.querySelector("#existing-target").value.trim() || "3x10-12";
     if (!id) { toast("Kies eerst een oefening"); return; }
     scheduleFor(activeSchemaDay).push({ exerciseId: id, target });
+    touchScheduleMeta(activeSchemaDay);
     saveState(); render();
     toast("Toegevoegd");
   };
@@ -771,7 +834,9 @@ function renderSchema() {
     if (!name) { toast("Vul een naam in"); return; }
     const id = uid("ex");
     state.library.push({ id, name, unit: "reps" });
+    touchLibraryMeta(id);
     scheduleFor(activeSchemaDay).push({ exerciseId: id, target });
+    touchScheduleMeta(activeSchemaDay);
     saveState(); render();
     toast("Oefening aangemaakt en toegevoegd");
   };
@@ -780,10 +845,11 @@ function renderSchema() {
   const libraryCard = document.createElement("div");
   libraryCard.className = "card";
   libraryCard.innerHTML = `<div class="card-title-row"><h3 class="card-title">Alle oefeningen</h3></div>`;
-  if (state.library.length === 0) {
+  const libraryList = activeLibrary();
+  if (libraryList.length === 0) {
     libraryCard.appendChild(emptyState("Nog geen oefeningen."));
   } else {
-    state.library.forEach((ex) => {
+    libraryList.forEach((ex) => {
       const row = document.createElement("div");
       row.className = "exercise-edit-row";
       row.innerHTML = `
@@ -930,7 +996,7 @@ function renderStats() {
   const lastCard = document.createElement("div");
   lastCard.className = "card";
   lastCard.innerHTML = `<div class="card-title-row"><h3 class="card-title">Laatste keer per oefening</h3></div>`;
-  const rows = state.library.map((ex) => {
+  const rows = activeLibrary().map((ex) => {
     let lastIso = null;
     Object.keys(state.logs).sort().forEach((iso) => {
       const sets = state.logs[iso][ex.id];
@@ -995,7 +1061,8 @@ function buildExportObject() {
   return {
     workouts,
     schema: state.schedule,
-    library: state.library
+    library: state.library,
+    meta: state.meta
   };
 }
 
@@ -1080,11 +1147,12 @@ function parseSetString(v) {
 /* looks up an exercise by name, auto-creating it if the library doesn't
    have it yet (instead of silently dropping the logged sets) */
 function findOrCreateExerciseByName(name, rawValues) {
-  let ex = state.library.find((e) => e.name === name);
+  let ex = state.library.find((e) => e.name === name && !e.deleted);
   if (ex) return ex;
   const looksLikeSeconds = rawValues.length > 0 && rawValues.every((v) => /^[\d.]+\s*sec$/i.test(String(v).trim()));
   ex = { id: uid("ex"), name, unit: looksLikeSeconds ? "seconds" : "reps" };
   state.library.push(ex);
+  touchLibraryMeta(ex.id);
   return ex;
 }
 
